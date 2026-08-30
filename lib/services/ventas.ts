@@ -272,3 +272,100 @@ export async function registrarAbono(input: {
     .eq("id", input.venta_id);
   if (errUpdate) throw errUpdate;
 }
+
+/**
+ * Elimina una venta. Los detalles y pagos se eliminan en cascada (on delete cascade).
+ * Los abonos asociados quedan con venta_id null pero conservan el registro.
+ */
+export async function eliminarVenta(ventaId: string): Promise<void> {
+  const { error: errAbonos } = await supabase
+    .from("abonos")
+    .update({ venta_id: null })
+    .eq("venta_id", ventaId);
+  if (errAbonos) throw errAbonos;
+
+  const { error } = await supabase.from("ventas").delete().eq("id", ventaId);
+  if (error) throw error;
+}
+
+export interface ActualizarVentaInput {
+  cliente_id: string | null;
+  items: ItemVenta[];
+  valor_pagado: number;
+  metodo_pago: MetodoPago;
+  fecha?: string;
+  observacion?: string;
+}
+
+/**
+ * Edita una venta: actualiza el cliente, reemplaza el detalle (recalculando el
+ * total), reemplaza los pagos y recalcula el saldo pendiente y el estado.
+ * Regla de deuda: total > pagado → PENDIENTE.
+ */
+export async function actualizarVenta(
+  ventaId: string,
+  input: ActualizarVentaInput
+): Promise<Venta> {
+  const total = input.items.reduce(
+    (acc, it) => acc + it.cantidad * it.precio_unitario,
+    0
+  );
+  const pagado = Math.min(Math.max(0, input.valor_pagado), total);
+  const saldo_pendiente = total - pagado;
+  const estado = saldo_pendiente > 0 ? "PENDIENTE" : "PAGADA";
+
+  // 1. Actualizar cabecera de la venta
+  const { data: venta, error: errVenta } = await supabase
+    .from("ventas")
+    .update({
+      cliente_id: input.cliente_id,
+      fecha: input.fecha ?? new Date().toISOString(),
+      total,
+      pagado,
+      saldo_pendiente,
+      estado,
+    })
+    .eq("id", ventaId)
+    .select()
+    .single();
+  if (errVenta) throw errVenta;
+
+  // 2. Reemplazar detalles
+  const { error: errBorrarDetalles } = await supabase
+    .from("detalle_ventas")
+    .delete()
+    .eq("venta_id", ventaId);
+  if (errBorrarDetalles) throw errBorrarDetalles;
+
+  const detalles = input.items.map((it) => ({
+    venta_id: ventaId,
+    producto_id: it.producto_id,
+    cantidad: it.cantidad,
+    precio_unitario: it.precio_unitario,
+    subtotal: it.cantidad * it.precio_unitario,
+  }));
+  const { error: errInsertDetalles } = await supabase
+    .from("detalle_ventas")
+    .insert(detalles);
+  if (errInsertDetalles) throw errInsertDetalles;
+
+  // 3. Reemplazar pagos
+  const { error: errBorrarPagos } = await supabase
+    .from("pagos")
+    .delete()
+    .eq("venta_id", ventaId);
+  if (errBorrarPagos) throw errBorrarPagos;
+
+  if (pagado > 0) {
+    const { error: errPago } = await supabase.from("pagos").insert({
+      venta_id: ventaId,
+      valor: pagado,
+      metodo_pago: input.metodo_pago,
+      fecha: input.fecha ?? new Date().toISOString(),
+      observacion: input.observacion ?? null,
+    });
+    if (errPago) throw errPago;
+  }
+
+  return venta;
+}

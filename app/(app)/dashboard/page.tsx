@@ -85,7 +85,7 @@ export default function DashboardPage() {
             value={formatCOP(data.ventasDelDia)}
             sub={`${data.numeroVentasDia} venta(s)`}
             icon={TrendingUp}
-            accent="text-blue-600"
+            accent="text-primary"
           />
           <StatCard
             label="Ingresos (cobrado)"
@@ -115,14 +115,14 @@ export default function DashboardPage() {
             value={formatCOP(data.porCobrar)}
             sub="Total clientes"
             icon={HandCoins}
-            accent="text-amber-600"
+            accent="text-orange-500"
           />
           <StatCard
             label="Chorizos vendidos"
             value={String(data.chorizosVendidos)}
             sub="Hoy"
             icon={Flame}
-            accent="text-orange-600"
+            accent="text-orange-500"
           />
           <StatCard
             label="Pedidos pendientes"
@@ -136,7 +136,7 @@ export default function DashboardPage() {
             value={String(data.alertasInventario)}
             sub="Stock bajo"
             icon={PiggyBank}
-            accent="text-rose-600"
+            accent="text-red-600"
           />
         </div>
       )}
