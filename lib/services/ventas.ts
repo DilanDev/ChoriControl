@@ -9,7 +9,10 @@ import type {
   Cliente,
 } from "@/types";
 import { supabase } from "@/lib/supabase/client";
-import { inicioDelDia, finDeHoy } from "@/lib/format";
+import { inicioDelDia, finDelDia } from "@/lib/format";
+
+const VENTA_SELECT =
+  "*, detalle_ventas(*, producto:productos(*)), pagos(*), cliente:clientes(*)";
 
 export interface ItemVenta {
   producto_id: string;
@@ -100,7 +103,7 @@ export async function getVentas(
 ): Promise<VentaConDetalles[]> {
   let query = supabase
     .from("ventas")
-    .select("*, detalle_ventas(*), pagos(*), cliente:clientes(*)")
+    .select(VENTA_SELECT)
     .order("fecha", { ascending: false });
 
   if (desde) query = query.gte("fecha", desde.toISOString());
@@ -111,14 +114,16 @@ export async function getVentas(
   return (data ?? []) as unknown as VentaConDetalles[];
 }
 
-export async function getVentasDelDia(): Promise<VentaConDetalles[]> {
-  return getVentas(inicioDelDia(), finDeHoy());
+export async function getVentasDelDia(
+  fecha = new Date()
+): Promise<VentaConDetalles[]> {
+  return getVentas(inicioDelDia(fecha), finDelDia(fecha));
 }
 
 export async function getVenta(id: string): Promise<VentaConDetalles | null> {
   const { data, error } = await supabase
     .from("ventas")
-    .select("*, detalle_ventas(*), pagos(*), cliente:clientes(*)")
+    .select(VENTA_SELECT)
     .eq("id", id)
     .single();
 
@@ -182,7 +187,7 @@ export async function getVentasPendientesDeCliente(
 ): Promise<VentaConDetalles[]> {
   const { data, error } = await supabase
     .from("ventas")
-    .select("*, detalle_ventas(*), pagos(*), cliente:clientes(*)")
+    .select(VENTA_SELECT)
     .eq("cliente_id", clienteId)
     .eq("estado", "PENDIENTE")
     .order("fecha", { ascending: true });
@@ -299,8 +304,12 @@ export interface ActualizarVentaInput {
 
 /**
  * Edita una venta: actualiza el cliente, reemplaza el detalle (recalculando el
- * total), reemplaza los pagos y recalcula el saldo pendiente y el estado.
- * Regla de deuda: total > pagado → PENDIENTE.
+ * total), conserva o reemplaza los pagos y recalcula el saldo pendiente y el
+ * estado. Regla de deuda: total > pagado → PENDIENTE.
+ *
+ * Si el valor pagado no cambió se conservan los pagos existentes (ids, fechas
+ * y métodos); si cambió, se reemplazan por un único pago con la fecha de la
+ * venta.
  */
 export async function actualizarVenta(
   ventaId: string,
@@ -314,17 +323,46 @@ export async function actualizarVenta(
   const saldo_pendiente = total - pagado;
   const estado = saldo_pendiente > 0 ? "PENDIENTE" : "PAGADA";
 
+  // Fecha de la venta: la enviada o, si no, la que ya tenía.
+  let fechaVenta: string;
+  if (input.fecha) {
+    fechaVenta = input.fecha;
+  } else {
+    const { data: actual, error: errActual } = await supabase
+      .from("ventas")
+      .select("fecha")
+      .eq("id", ventaId)
+      .single();
+    if (errActual) throw errActual;
+    fechaVenta = actual.fecha as string;
+  }
+
+  // ¿Cambió el monto pagado? Solo entonces se reescriben los pagos.
+  const { data: pagosActuales, error: errPagosActuales } = await supabase
+    .from("pagos")
+    .select("valor")
+    .eq("venta_id", ventaId);
+  if (errPagosActuales) throw errPagosActuales;
+
+  const totalPagadoActual = (pagosActuales ?? []).reduce(
+    (acc, p) => acc + Number(p.valor),
+    0
+  );
+  const pagosCambiaron = Math.abs(totalPagadoActual - pagado) > 0.009;
+
   // 1. Actualizar cabecera de la venta
+  const cambios = {
+    cliente_id: input.cliente_id,
+    total,
+    pagado,
+    saldo_pendiente,
+    estado,
+    ...(input.fecha ? { fecha: input.fecha } : {}),
+  };
+
   const { data: venta, error: errVenta } = await supabase
     .from("ventas")
-    .update({
-      cliente_id: input.cliente_id,
-      fecha: input.fecha ?? new Date().toISOString(),
-      total,
-      pagado,
-      saldo_pendiente,
-      estado,
-    })
+    .update(cambios)
     .eq("id", ventaId)
     .select()
     .single();
@@ -349,22 +387,24 @@ export async function actualizarVenta(
     .insert(detalles);
   if (errInsertDetalles) throw errInsertDetalles;
 
-  // 3. Reemplazar pagos
-  const { error: errBorrarPagos } = await supabase
-    .from("pagos")
-    .delete()
-    .eq("venta_id", ventaId);
-  if (errBorrarPagos) throw errBorrarPagos;
+  // 3. Reemplazar pagos solo si el monto pagado cambió
+  if (pagosCambiaron) {
+    const { error: errBorrarPagos } = await supabase
+      .from("pagos")
+      .delete()
+      .eq("venta_id", ventaId);
+    if (errBorrarPagos) throw errBorrarPagos;
 
-  if (pagado > 0) {
-    const { error: errPago } = await supabase.from("pagos").insert({
-      venta_id: ventaId,
-      valor: pagado,
-      metodo_pago: input.metodo_pago,
-      fecha: input.fecha ?? new Date().toISOString(),
-      observacion: input.observacion ?? null,
-    });
-    if (errPago) throw errPago;
+    if (pagado > 0) {
+      const { error: errPago } = await supabase.from("pagos").insert({
+        venta_id: ventaId,
+        valor: pagado,
+        metodo_pago: input.metodo_pago,
+        fecha: fechaVenta,
+        observacion: input.observacion ?? null,
+      });
+      if (errPago) throw errPago;
+    }
   }
 
   return venta;

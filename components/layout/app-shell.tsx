@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
+import { Flame } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { AppNav } from "@/components/layout/app-nav";
 
@@ -17,8 +18,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen text-muted-foreground">
-        Cargando...
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background text-muted-foreground">
+        <span className="rounded-2xl bg-primary p-3 text-primary-foreground">
+          <Flame className="h-8 w-8" />
+        </span>
+        <p className="text-sm">Cargando ChoriControl...</p>
       </div>
     );
   }
@@ -28,9 +32,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex min-h-screen bg-background">
       <AppNav />
-      <main className="flex-1 md:pl-0 pb-16 md:pb-0 bg-muted/30 min-w-0">
+      <main className="min-w-0 flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))] pt-14 md:pb-0 md:pt-0">
         {children}
       </main>
     </div>

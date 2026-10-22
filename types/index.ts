@@ -52,6 +52,7 @@ export interface DetalleVenta {
   cantidad: number;
   precio_unitario: number;
   subtotal: number;
+  producto?: Producto | null;
 }
 
 export interface Pago {

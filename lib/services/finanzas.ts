@@ -2,7 +2,13 @@
 
 import type { Gasto, CategoriaGasto, Pago, MetodoPago } from "@/types";
 import { supabase } from "@/lib/supabase/client";
-import { inicioDelDia, finDeHoy, inicioDeSemana } from "@/lib/format";
+import {
+  finDeHoy,
+  fechaISOLocal,
+  inicioDelDia,
+  inicioDeSemana,
+} from "@/lib/format";
+import { METODOS_PAGO_VACIOS } from "@/lib/constants";
 
 // ---- GASTOS ----
 
@@ -141,27 +147,35 @@ export async function getResumenDashboard() {
   const fin = finDeHoy();
   const semana = inicioDeSemana();
 
-  const [ventasHoy, pagosHoy, gastosHoy, deudores, ventasSemana, productos] =
-    await Promise.all([
-      supabase
-        .from("ventas")
-        .select("total, saldo_pendiente, id")
-        .gte("fecha", hoy.toISOString())
-        .lte("fecha", fin.toISOString()),
-      getPagos(hoy, fin),
-      getGastos(hoy, fin),
-      getDeudoresRaw(),
-      supabase
-        .from("ventas")
-        .select("total")
-        .gte("fecha", semana.toISOString())
-        .lte("fecha", fin.toISOString()),
-      supabase.from("productos").select("*"),
-    ]);
+  const [
+    ventasHoy,
+    pagosHoy,
+    gastosHoy,
+    porCobrar,
+    ventasSemana,
+    chorizosVendidos,
+  ] = await Promise.all([
+    supabase
+      .from("ventas")
+      .select("total, saldo_pendiente, id")
+      .gte("fecha", hoy.toISOString())
+      .lte("fecha", fin.toISOString()),
+    getPagos(hoy, fin),
+    getGastos(hoy, fin),
+    getTotalPorCobrar(),
+    supabase
+      .from("ventas")
+      .select("total")
+      .gte("fecha", semana.toISOString())
+      .lte("fecha", fin.toISOString()),
+    getChorizosVendidos(hoy, fin),
+  ]);
+
+  if (ventasHoy.error) throw ventasHoy.error;
+  if (ventasSemana.error) throw ventasSemana.error;
 
   const ventasHoyRows = ventasHoy.data ?? [];
   const ventasSemanaRows = ventasSemana.data ?? [];
-  const productosRows = productos.data ?? [];
 
   const ventasDelDia = ventasHoyRows.reduce(
     (acc, v) => acc + Number(v.total),
@@ -173,22 +187,10 @@ export async function getResumenDashboard() {
     0
   );
   const gananciaEstimada = ingresosHoy - gastosHoyTotal;
-  const porCobrar = deudores.totalPorCobrar;
   const ventasSemanaTotal = ventasSemanaRows.reduce(
     (acc, v) => acc + Number(v.total),
     0
   );
-
-  // Alertas de inventario (stock bajo / agotado)
-  const alertasInventario = productosRows.filter(
-    (p) => Number(p.stock_actual) <= Number(p.stock_minimo)
-  );
-
-  // Pedidos pendientes
-  const { data: pedidosPendientes, error: errPedidos } = await supabase
-    .from("pedidos")
-    .select("id")
-    .in("estado", ["Pendiente", "Preparando", "Listo"]);
 
   return {
     ventasDelDia,
@@ -197,25 +199,128 @@ export async function getResumenDashboard() {
     gananciaEstimada,
     porCobrar,
     numeroVentasDia: ventasHoyRows.length,
-    chorizosVendidos: await getChorizosVendidos(hoy, fin),
-    pedidosPendientes: errPedidos ? 0 : (pedidosPendientes?.length ?? 0),
-    alertasInventario: alertasInventario.length,
+    chorizosVendidos,
     ventasSemana: ventasSemanaTotal,
   };
 }
 
-async function getDeudoresRaw() {
+async function getTotalPorCobrar(): Promise<number> {
   const { data, error } = await supabase
     .from("ventas")
     .select("saldo_pendiente")
     .eq("estado", "PENDIENTE");
 
-  if (error) return { totalPorCobrar: 0 };
+  if (error) throw error;
+  return (data ?? []).reduce(
+    (acc, v) => acc + Number(v.saldo_pendiente),
+    0
+  );
+}
+
+// ---- CONTABILIDAD ----
+
+export interface DiaContabilidad {
+  fecha: string;
+  facturado: number;
+  cobrado: number;
+  gastos: number;
+}
+
+export interface ResumenContabilidad {
+  facturado: number;
+  cobrado: number;
+  gastos: number;
+  ganancia: number;
+  porCobrar: number;
+  numeroVentas: number;
+  chorizosVendidos: number;
+  porMetodo: Record<MetodoPago, number>;
+  porCategoria: { nombre: string; total: number }[];
+  serieDiaria: DiaContabilidad[];
+  pagos: Pago[];
+  gastosList: GastoConCategoria[];
+}
+
+/**
+ * Agrega ventas, pagos y gastos de un período en memoria (volumen pequeño de
+ * un solo negocio). "Cobrado" usa la tabla pagos, que ya incluye los abonos.
+ */
+export async function getResumenContabilidad(
+  desde: Date,
+  hasta: Date
+): Promise<ResumenContabilidad> {
+  const [ventasRes, pagos, gastosList, porCobrar, chorizosVendidos] =
+    await Promise.all([
+      supabase
+        .from("ventas")
+        .select("id, total, fecha")
+        .gte("fecha", desde.toISOString())
+        .lte("fecha", hasta.toISOString()),
+      getPagos(desde, hasta),
+      getGastos(desde, hasta),
+      getTotalPorCobrar(),
+      getChorizosVendidos(desde, hasta),
+    ]);
+
+  if (ventasRes.error) throw ventasRes.error;
+
+  const ventas = ventasRes.data ?? [];
+  const facturado = ventas.reduce((acc, v) => acc + Number(v.total), 0);
+  const cobrado = pagos.reduce((acc, p) => acc + Number(p.valor), 0);
+  const gastos = gastosList.reduce((acc, g) => acc + Number(g.valor), 0);
+
+  const porMetodo: Record<MetodoPago, number> = { ...METODOS_PAGO_VACIOS };
+  for (const p of pagos) {
+    const metodo = p.metodo_pago as MetodoPago;
+    porMetodo[metodo] = (porMetodo[metodo] ?? 0) + Number(p.valor);
+  }
+
+  const categorias = new Map<string, number>();
+  for (const g of gastosList) {
+    const nombre = g.categoria?.nombre ?? "Sin categoría";
+    categorias.set(nombre, (categorias.get(nombre) ?? 0) + Number(g.valor));
+  }
+  const porCategoria = Array.from(categorias.entries())
+    .map(([nombre, total]) => ({ nombre, total }))
+    .sort((a, b) => b.total - a.total);
+
+  const serie = new Map<string, DiaContabilidad>();
+  const cursor = inicioDelDia(desde);
+  const fin = hasta;
+  let dias = 0;
+  while (cursor <= fin && dias < 400) {
+    const clave = fechaISOLocal(cursor);
+    serie.set(clave, { fecha: clave, facturado: 0, cobrado: 0, gastos: 0 });
+    cursor.setDate(cursor.getDate() + 1);
+    dias += 1;
+  }
+
+  for (const v of ventas) {
+    const dia = serie.get(fechaISOLocal(new Date(v.fecha)));
+    if (dia) dia.facturado += Number(v.total);
+  }
+  for (const p of pagos) {
+    const dia = serie.get(fechaISOLocal(new Date(p.fecha)));
+    if (dia) dia.cobrado += Number(p.valor);
+  }
+  for (const g of gastosList) {
+    const dia = serie.get(fechaISOLocal(new Date(g.fecha)));
+    if (dia) dia.gastos += Number(g.valor);
+  }
+
   return {
-    totalPorCobrar: (data ?? []).reduce(
-      (acc, v) => acc + Number(v.saldo_pendiente),
-      0
-    ),
+    facturado,
+    cobrado,
+    gastos,
+    ganancia: cobrado - gastos,
+    porCobrar,
+    numeroVentas: ventas.length,
+    chorizosVendidos,
+    porMetodo,
+    porCategoria,
+    serieDiaria: Array.from(serie.values()),
+    pagos,
+    gastosList,
   };
 }
 

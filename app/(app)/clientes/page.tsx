@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Phone, Pencil, Trash2, History } from "lucide-react";
+import {
+  Contact,
+  Plus,
+  Phone,
+  Pencil,
+  Search,
+  Trash2,
+  History,
+} from "lucide-react";
 import { PageContainer, LoadingState, ErrorState } from "@/components/ui/page";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
@@ -21,6 +29,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { EmptyState } from "@/components/ui/empty-state";
+import { useToast } from "@/components/ui/toast";
 import {
   getClientes,
   createCliente,
@@ -38,12 +49,18 @@ interface ClienteConResumen extends Cliente {
 }
 
 export default function ClientesPage() {
+  const { toast } = useToast();
   const [clientes, setClientes] = useState<ClienteConResumen[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Cliente | null>(null);
   const [historialCliente, setHistorialCliente] = useState<Cliente | null>(null);
+  const [busqueda, setBusqueda] = useState("");
+  const [clienteAEliminar, setClienteAEliminar] = useState<Cliente | null>(
+    null
+  );
+  const [historialError, setHistorialError] = useState<string | null>(null);
   const [historial, setHistorial] = useState<{
     ventas: Venta[];
     abonos: Abono[];
@@ -88,6 +105,7 @@ export default function ClientesPage() {
   async function openHistorial(c: Cliente) {
     setHistorialCliente(c);
     setHistorial(null);
+    setHistorialError(null);
     try {
       const [ventas, abonos] = await Promise.all([
         getVentas(),
@@ -97,20 +115,42 @@ export default function ClientesPage() {
         ventas: ventas.filter((v) => v.cliente_id === c.id),
         abonos,
       });
-    } catch {
+    } catch (e) {
+      setHistorialError(
+        e instanceof Error ? e.message : "Error al cargar el historial"
+      );
       setHistorial({ ventas: [], abonos: [] });
     }
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm("¿Seguro que deseas eliminar este cliente?")) return;
+  async function confirmarEliminar() {
+    if (!clienteAEliminar) return;
     try {
-      await deleteCliente(id);
+      await deleteCliente(clienteAEliminar.id);
+      toast({
+        title: "Cliente eliminado",
+        description: clienteAEliminar.nombre,
+        variant: "success",
+      });
       await load();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Error al eliminar");
+      toast({
+        title: "No se pudo eliminar el cliente",
+        description: e instanceof Error ? e.message : "Inténtalo de nuevo.",
+        variant: "error",
+      });
+      throw e;
     }
   }
+
+  const normalizado = busqueda.trim().toLowerCase();
+  const clientesFiltrados = normalizado
+    ? clientes.filter(
+        (c) =>
+          c.nombre.toLowerCase().includes(normalizado) ||
+          (c.telefono ?? "").toLowerCase().includes(normalizado)
+      )
+    : clientes;
 
   return (
     <PageContainer>
@@ -124,24 +164,52 @@ export default function ClientesPage() {
               setDialogOpen(true);
             }}
           >
-            <Plus className="h-4 w-4 mr-2" /> Nuevo
+            <Plus className="h-4 w-4" /> Nuevo cliente
           </Button>
         }
       />
 
-      {error && <ErrorState message={error} />}
+      <div className="relative mb-4">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={busqueda}
+          onChange={(e) => setBusqueda(e.target.value)}
+          placeholder="Buscar por nombre o teléfono"
+          className="pl-9"
+          aria-label="Buscar clientes"
+        />
+      </div>
+
+      {error && <ErrorState message={error} onRetry={load} />}
       {loading && <LoadingState />}
 
       {!loading && !error && (
         <div className="space-y-3">
           {clientes.length === 0 && (
-            <Card>
-              <CardContent className="py-12 text-center text-muted-foreground">
-                No hay clientes registrados todavía.
-              </CardContent>
-            </Card>
+            <EmptyState
+              icon={Contact}
+              title="No hay clientes registrados"
+              description="Agrega tu primer cliente para llevar su historial y sus deudas."
+              action={
+                <Button
+                  onClick={() => {
+                    setEditing(null);
+                    setDialogOpen(true);
+                  }}
+                >
+                  <Plus className="h-4 w-4" /> Nuevo cliente
+                </Button>
+              }
+            />
           )}
-          {clientes.map((c) => (
+          {clientes.length > 0 && clientesFiltrados.length === 0 && (
+            <EmptyState
+              icon={Search}
+              title="Sin resultados"
+              description={`No encontramos clientes que coincidan con “${busqueda.trim()}”.`}
+            />
+          )}
+          {clientesFiltrados.map((c) => (
             <Card key={c.id}>
               <CardContent className="flex items-center justify-between gap-3 p-4">
                 <div className="min-w-0">
@@ -167,6 +235,7 @@ export default function ClientesPage() {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label={`Ver historial de ${c.nombre}`}
                     title="Historial"
                     onClick={() => openHistorial(c)}
                   >
@@ -175,6 +244,7 @@ export default function ClientesPage() {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label={`Editar ${c.nombre}`}
                     title="Editar"
                     onClick={() => {
                       setEditing(c);
@@ -186,10 +256,11 @@ export default function ClientesPage() {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label={`Eliminar ${c.nombre}`}
                     title="Eliminar"
-                    onClick={() => handleDelete(c.id)}
+                    onClick={() => setClienteAEliminar(c)}
                   >
-                    <Trash2 className="h-4 w-4" />
+                    <Trash2 className="h-4 w-4 text-destructive" />
                   </Button>
                 </div>
               </CardContent>
@@ -218,6 +289,9 @@ export default function ClientesPage() {
           </DialogHeader>
           {historial ? (
             <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+              {historialError && (
+                <Alert variant="destructive">{historialError}</Alert>
+              )}
               <div>
                 <h4 className="font-semibold text-sm mb-2">Ventas</h4>
                 {historial.ventas.length === 0 && (
@@ -280,6 +354,21 @@ export default function ClientesPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={!!clienteAEliminar}
+        onOpenChange={(abierto) => {
+          if (!abierto) setClienteAEliminar(null);
+        }}
+        title="Eliminar cliente"
+        description={
+          clienteAEliminar
+            ? `Se eliminará a ${clienteAEliminar.nombre}. Sus ventas quedarán sin cliente asociado.`
+            : undefined
+        }
+        confirmLabel="Eliminar cliente"
+        onConfirm={confirmarEliminar}
+      />
     </PageContainer>
   );
 }
@@ -295,6 +384,7 @@ function ClienteForm({
   cliente: Cliente | null;
   onSaved: () => Promise<void>;
 }) {
+  const { toast } = useToast();
   const [nombre, setNombre] = useState("");
   const [telefono, setTelefono] = useState("");
   const [direccion, setDireccion] = useState("");
@@ -328,6 +418,11 @@ function ClienteForm({
           direccion: direccion.trim() || undefined,
         });
       }
+      toast({
+        title: cliente ? "Cliente actualizado" : "Cliente creado",
+        description: nombre.trim(),
+        variant: "success",
+      });
       setOpen(false);
       await onSaved();
     } catch (err) {
@@ -339,7 +434,7 @@ function ClienteForm({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
             {cliente ? "Editar cliente" : "Nuevo cliente"}

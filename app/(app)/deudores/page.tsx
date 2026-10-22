@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { HandCoins } from "lucide-react";
+import { CheckCircle2, HandCoins } from "lucide-react";
 import { PageContainer, LoadingState, ErrorState } from "@/components/ui/page";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { useToast } from "@/components/ui/toast";
 import { Alert } from "@/components/ui/alert";
 import {
   Dialog,
@@ -43,6 +45,7 @@ const metodos: MetodoPago[] = [
 ];
 
 export default function DeudoresPage() {
+  const { toast } = useToast();
   const [deudores, setDeudores] = useState<DeudorRow[]>([]);
   const [totalPorCobrar, setTotalPorCobrar] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -71,7 +74,11 @@ export default function DeudoresPage() {
     <PageContainer>
       <PageHeader
         title="Deudores"
-        description="Clientes con saldo pendiente por cobrar"
+        description={
+          !loading && !error
+            ? `${deudores.length} cliente(s) con saldo pendiente`
+            : "Clientes con saldo pendiente por cobrar"
+        }
       />
 
       <Card className="mb-6">
@@ -82,7 +89,7 @@ export default function DeudoresPage() {
           <div>
             <div className="text-sm text-muted-foreground">Total por cobrar</div>
             <div className="text-3xl font-bold tracking-tight">
-              {!loading && formatCOP(totalPorCobrar)}
+              {!loading && !error ? formatCOP(totalPorCobrar) : "—"}
             </div>
           </div>
         </CardContent>
@@ -94,11 +101,11 @@ export default function DeudoresPage() {
       {!loading && !error && (
         <div className="space-y-3">
           {deudores.length === 0 && (
-            <Card>
-              <CardContent className="py-12 text-center text-green-600">
-                ¡No hay deudores! Todo está al día.
-              </CardContent>
-            </Card>
+            <EmptyState
+              icon={CheckCircle2}
+              title="¡Todo está al día!"
+              description="No hay clientes con saldo pendiente por cobrar."
+            />
           )}
           {deudores.map((d) => (
             <Card key={d.cliente_id}>
@@ -140,6 +147,11 @@ export default function DeudoresPage() {
           setOpen={() => setAbonarDeudor(null)}
           onDone={() => {
             setAbonarDeudor(null);
+            toast({
+              title: "Abono registrado",
+              description: `Deuda de ${abonarDeudor.cliente.nombre} actualizada.`,
+              variant: "success",
+            });
             load();
           }}
         />
